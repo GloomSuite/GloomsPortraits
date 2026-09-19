@@ -15,8 +15,7 @@
 > another one.** Before any change, decide which repo OWNS it and say so in one line, up front.
 >
 > **Belongs HERE (`~/GloomsPortraits`):** the model/portrait frames, their placement, sizing,
-> rotation, show conditions, the control panel (stage 1) and the contents of the Portraits tab
-> (stage 2).
+> rotation, show conditions, and the contents of the Portraits tab.
 > **Belongs in `~/GloomsHub`:** the Suite window + tab API · the shared `LibGloomSkin` toolkit ·
 > media registration/resolver · the one minimap launcher · the suite docs and backlog.
 > Full rule + ownership table: `~/GloomsHub/CLAUDE.md`.
@@ -46,18 +45,31 @@ GLOBAL, referenced exactly once, in `MigrateFromPredecessor` — the same preced
 - While both addons are enabled they both draw — two models. That is expected for the one
   login the copy needs; disable the old addon after it.
 
-## Stage plan (BACKLOG item 11 in the Hub)
+## Shape (both stages landed 2026-09-19, owner-QA'd)
 
-- **Stage 1 — DONE 2026-09-19:** suite member, no visual change. Same frames, same panel.
-- **Stage 2 — its own session:** replace the panel with a **Portraits tab** in the Suite window
-  on `LibGloomSkin` (rail + editor like GB, sliding switches, the shared sliders/colour picker).
-  Read `GloomsPortraits.lua` properly before designing. **The owner does not want a mockup
-  first** (2026-09-19) — infer the design from the sibling tabs and build it. When the tab
-  lands, the minimap button in `CreateMinimapButton` goes: the suite has ONE launcher.
+- **`GloomsPortraits.lua` — the ENGINE.** The frames, the saved settings, visibility, the
+  secret-GUID guard for 3D models in instances (measured in a delve, see the comment above
+  `CanShowUnit`), and a small API on the `GloomsPortraits` namespace that the tab drives:
+  `Config · ApplyLayout · Nudge · SetMode · SetStrata · SetCondition · SetCamera · Reset ·
+  SetEditing · OnChange`. It draws no UI.
+- **`GloomsPortraits_Tab.lua` — the PORTRAITS tab** (`GloomsHub:RegisterTab`, id `portraits`,
+  order 40), built entirely on `LibGloomSkin` and laid out like GB/Overlays: rail (the Gp mark,
+  a Player/Target list, Reset) + a scrolling editor (mode, size + position with nudge, the 3D
+  camera section that hides in 2D, layer, visibility). **Everything applies live; there is no
+  Save.** Gate `SKIN_NEEDS = 4` (tabHeader); bump it in the same commit as any newer call.
+- **The tab is the lock.** `SetEditing(which)` on the container's OnShow unlocks dragging and
+  shows the green outline for the selected unit; OnHide locks everything. There is no other
+  lock/unlock control, on purpose.
+- **No profile block, no minimap button, no floating panel.** Portraits has two fixed units
+  and one account-wide config, so there is nothing to switch between; the suite has ONE
+  launcher (the Hub's); `/gp` opens the tab. The old `/gp lock|unlock|panel|reset`
+  subcommands are gone with the panel.
+- **The Gp mark** (`Media/ui/logo.png`, 512² RGBA) is the family G with the orange **b** from
+  GB's mark flipped vertically — a flipped b IS a p. Composed by script, not drawn.
 
 ## Conventions
-- Namespace: frames are `GloomsPortraits_*`; slash is **`/gp`** (`/portraits` and the old `/sm`
-  also work). Chat prefix `|cff936bffGloom's Portraits:|r`.
+- Namespace: `GloomsPortraits` → `_G.GloomsPortraits`; frames are `GloomsPortraits_*`; slash is
+  **`/gp`** (`/portraits` and the old `/sm` also work). Chat prefix `|cff936bffGloom's Portraits:|r`.
 - Plain frames, plain SavedVariables, no Ace3, no embedded libraries — LibStub/LDB/LibDBIcon
   come from the Hub, which is a hard dependency.
 - US spelling in user-visible text.
@@ -65,5 +77,7 @@ GLOBAL, referenced exactly once, in `MigrateFromPredecessor` — the same preced
 ## Testing / release
 Symlinked into the client at `…/Interface/AddOns/GloomsPortraits`. QA by the owner (non-dev):
 ONE copy-paste step at a time, verify before claiming, BugSack error text first. `/reload` is
-enough, including for new files (fonts excepted). Ships via BigWigs packager → GitHub Releases
-(repo `GloomSuite/GloomsPortraits`), WoWup.
+enough, including for new files (fonts excepted). Tags cut a GitHub Release via the BigWigs
+packager (repo `GloomSuite/GloomsPortraits`) as a version marker; **the owner runs the symlink,
+not a release**, and any public distribution would go through CurseForge, not WoWup
+(2026-09-19).

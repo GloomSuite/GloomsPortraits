@@ -1,6 +1,7 @@
 ## Interface: 120100
 ## Title: Gloom's Portraits
 ## Notes: Free-floating 3D models or 2D circular portraits for player and target — placeable, sizeable, rotatable, with show conditions. Part of the Gloom Suite.
+## IconTexture: Interface\AddOns\GloomsPortraits\Media\ui\logo.png
 ## Author: Gloom
 ## Version: @project-version@
 ## Dependencies: GloomsHub
@@ -8,3 +9,4 @@
 ## SavedVariables: GloomsPortraitsDB
 
 GloomsPortraits.lua
+GloomsPortraits_Tab.lua

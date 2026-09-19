@@ -1,16 +1,20 @@
--- GloomsPortraits.lua — Gloom's Portraits, the suite's fifth tool.
+-- GloomsPortraits.lua — Gloom's Portraits, the suite's fifth tool: the ENGINE.
 -- Free-floating 3D full-body models OR 2D circular portraits for player and target.
--- /gp (or /portraits, /sm) toggles the control panel.
+-- /gp opens the Portraits tab of the Suite window (GloomsPortraits_Tab.lua).
 --
--- STAGE 1 (2026-09-19): a suite member with NO visual change — same frames, same
--- panel, same behaviour as the single-file addon it grew from, plus a one-time copy
--- of that addon's saved settings. Stage 2 replaces the panel with a Portraits tab in
--- the Suite window on LibGloomSkin; see docs/BACKLOG.md item 11 in ~/GloomsHub.
+-- This file owns the frames and the saved settings and exposes a small API on
+-- `GloomsPortraits` for the tab. It draws no config UI of its own: the old
+-- floating control panel (stage 1, 2026-09-19) was replaced by the Suite tab
+-- in stage 2 the same day, and the minimap button went with it — the suite has
+-- ONE launcher, the Hub's GS button.
 --
 -- COORDINATE SYSTEM NOTE:
 -- WoW's UI coordinate space is always 768 units tall regardless of resolution.
 -- For 16:9, width is ~1365 units. Screen center is 0,0.
 -- Safe X range ~-600 to +600, Y range ~-350 to +350.
+
+local GP = {}
+_G.GloomsPortraits = GP
 
 ------------------------------------------------------------------------
 -- Defaults
@@ -51,15 +55,15 @@ local isUnlocked  = false
 local models      = {}   -- PlayerModel frames (3D)
 local portraits   = {}   -- portrait container frames (2D)
 local anchors     = {}   -- invisible draggable anchor frames
-local panels      = {}
-local ghosts      = {}   -- green outlines shown during drag / panel open
-local refreshUI   = {}   -- per-unit fn to re-sync panel controls to db
+local ghosts      = {}   -- green outlines shown while a unit is being edited
+local editing     = nil  -- which unit the tab is editing ("player"/"target"/nil)
+local blocked     = {}   -- per unit: the game refused to identify it for a 3D model
+local listeners   = {}   -- tab callbacks: fn(what, which)
 
 ------------------------------------------------------------------------
 -- Forward declarations
 ------------------------------------------------------------------------
 local UpdateVisibility
-local SetLocked
 
 ------------------------------------------------------------------------
 -- Helpers
@@ -84,6 +88,40 @@ local function SavePosition(which)
 end
 
 ------------------------------------------------------------------------
+-- Per-mode layouts. `x y size strata` at the top level are always the ACTIVE
+-- mode's values (every reader stays simple and every old save loads as-is);
+-- the other mode's set waits in cfg.layouts[mode]. Switching modes stashes
+-- one and restores the other, so 3D and 2D each keep their own size, place
+-- and layer — and the 2D set is what the in-combat stand-in wears.
+------------------------------------------------------------------------
+local LAYOUT_KEYS = { "x", "y", "size", "strata" }
+
+local function StashLayout(cfg, mode)
+    cfg.layouts = cfg.layouts or {}
+    local t = cfg.layouts[mode] or {}
+    for _, k in ipairs(LAYOUT_KEYS) do t[k] = cfg[k] end
+    cfg.layouts[mode] = t
+end
+
+-- Load `mode`'s stashed layout into the top level. A mode never visited
+-- starts where the current one is, which is the least surprising place.
+local function RestoreLayout(cfg, mode)
+    local t = cfg.layouts and cfg.layouts[mode]
+    if not t then return end
+    for _, k in ipairs(LAYOUT_KEYS) do
+        if t[k] ~= nil then cfg[k] = t[k] end
+    end
+end
+
+-- The layout the 2D stand-in should wear while the unit is in 3D mode, or
+-- nil (no 2D layout defined yet → follow the model).
+local function StandInLayout(which)
+    local cfg = db[which]
+    if (cfg.mode or "3d") ~= "3d" then return nil end
+    return cfg.layouts and cfg.layouts["2d"] or nil
+end
+
+------------------------------------------------------------------------
 -- Sync visual frames to anchor position/size
 ------------------------------------------------------------------------
 local function SyncToAnchor(which)
@@ -104,8 +142,18 @@ local function SyncToAnchor(which)
     local portFrame = portraits[which]
     if portFrame then
         portFrame:ClearAllPoints()
-        portFrame:SetSize(cfg.size, cfg.size)
-        portFrame:SetPoint("CENTER", UIParent, "CENTER", ox, oy)
+        -- In 3D mode the portrait only ever appears as the STAND-IN for a
+        -- blocked model, and then it wears the 2D layout the owner defined
+        -- (the owner, 2026-09-19: a stand-in at the model's size and place
+        -- is wrong). With no 2D layout defined yet it follows the model.
+        local sl = StandInLayout(which)
+        if sl then
+            portFrame:SetSize(sl.size, sl.size)
+            portFrame:SetPoint("CENTER", UIParent, "CENTER", sl.x, sl.y)
+        else
+            portFrame:SetSize(cfg.size, cfg.size)
+            portFrame:SetPoint("CENTER", UIParent, "CENTER", ox, oy)
+        end
     end
 
     local g = ghosts[which]
@@ -129,11 +177,18 @@ end
 -- party member's) model sitting on screen, looking like a working feature showing
 -- the wrong unit.
 --
--- Only ENEMY identity is secret, which is why friendly and party units keep
--- working in the same delve, and why the open world is fine.
+-- ★ RE-MEASURED 2026-09-19, same delve: the secrecy is a COMBAT rule, not an
+-- instance rule. Out of combat, UnitGUID and UnitName of the same hostile are
+-- both readable (issecretvalue → false) and SetUnit works; the moment the pull
+-- starts they go secret. Only ENEMY identity is affected either way, which is
+-- why friendly and party units keep working in the same delve.
 --
--- There is NO addon-side workaround -- this is a deliberate Blizzard restriction,
--- not something to be clever about. The only honest response is to show nothing.
+-- What that buys: a mob targeted BEFORE the pull gets its real 3D model, and the
+-- frame keeps it through the fight because nothing re-asks the game until the
+-- target changes. A mob targeted MID-fight cannot be identified — the honest
+-- response is the 2D stand-in (UpdateVisibility), never a stale model — and
+-- PLAYER_REGEN_ENABLED re-asks so the stand-in yields to 3D when combat ends.
+-- There is no addon-side way past the in-combat half: the model IS the identity.
 local function CanShowUnit(unit)
     if not UnitExists(unit) then return false end
     -- issecretvalue is the only safe question to ask: never compare or concatenate
@@ -142,23 +197,101 @@ local function CanShowUnit(unit)
     return true
 end
 
-local function SetupModel(which)
-    local model = models[which]
-    if not model then return end
-    local cfg  = db[which]
-    local unit = (which == "player") and "player" or "target"
-    if not CanShowUnit(unit) then
-        -- Empty beats WRONG. A stale model is indistinguishable from a correct one.
-        if model.ClearModel then model:ClearModel() end
-        return
-    end
-    model:SetUnit(unit)
+local function ApplyCamera(model, cfg)
     model:SetFacing(cfg.facing)
     model:SetPortraitZoom(0)
     model:SetCamDistanceScale(cfg.zoom)
     model:SetAnimation(0)
     model:SetViewTranslation(0, cfg.modelYOffset or 0)
     model:SetPitch(cfg.pitch or 0)
+end
+
+------------------------------------------------------------------------
+-- The NAMEPLATE CACHE — how a mob targeted before the pull keeps its 3D model
+-- when you tab BACK to it mid-combat.
+--
+-- ★ MEASURED IN A DELVE, 2026-09-19 (all with /dump issecretvalue):
+--   · UnitGUID("target")     out of combat → false; in combat → true.
+--   · UnitGUID("nameplateN") out of combat → TRUE. Plates are secret on the
+--     map, combat or not — so "record the whole pack as it comes into view"
+--     is impossible; a model of a plate unit never even loads (display 0,
+--     OnModelLoaded never fires).
+--   · UnitGUID("mouseover")  out of combat → TRUE. Hovering identifies nothing.
+--   · UnitIsUnit("target", "nameplateN") in combat → a REAL boolean (one
+--     plate true, the rest false, none secret).
+-- So the game identifies exactly ONE unit for an addon on a restricted map —
+-- the target, out of combat — but will always say WHICH PLATE the target is.
+--
+-- Hence: each time the target is identifiable, its creature ID (from the
+-- GUID) is recorded against the plate it is standing under. In combat, when
+-- the identity is withheld, the target's plate is matched and the recorded
+-- creature ID goes to SetCreature, which takes a plain number and is not
+-- guarded. Plate tokens are REUSED as plates come and go, so an entry dies
+-- with NAME_PLATE_UNIT_REMOVED. Players are never recorded (SetUnit works
+-- on them anyway, and a creature model is the wrong thing for a player).
+-- A mob never targeted before the pull cannot be identified — it gets the
+-- 2D stand-in (UpdateVisibility), never a stale or guessed model.
+------------------------------------------------------------------------
+local plateCache = {}     -- "nameplateN" -> creature ID, while that plate is up
+
+-- The plate the target is standing under, or nil. Safe in combat.
+local function TargetPlate()
+    for i = 1, 40 do
+        local token = "nameplate" .. i
+        if UnitExists(token) then
+            local same = UnitIsUnit("target", token)
+            if not (issecretvalue and issecretvalue(same)) and same then return token end
+        end
+    end
+end
+
+-- Called whenever the target changes: record it if the game will identify it.
+local function RecordTarget()
+    if not UnitExists("target") then return end
+    local guid = UnitGUID("target")
+    if not guid or (issecretvalue and issecretvalue(guid)) then return end   -- in combat
+    local kind, _, _, _, _, npcID = strsplit("-", guid)
+    if (kind ~= "Creature" and kind ~= "Vehicle") or not tonumber(npcID) then return end
+    local token = TargetPlate()
+    if token then plateCache[token] = tonumber(npcID) end
+end
+
+-- The creature ID recorded for whichever plate the target IS, or nil.
+local function CachedTargetCreature()
+    local token = TargetPlate()
+    return token and plateCache[token] or nil, token
+end
+
+local function SetupModel(which)
+    local model = models[which]
+    if not model then return end
+    local cfg  = db[which]
+    local unit = (which == "player") and "player" or "target"
+    blocked[which] = not CanShowUnit(unit)
+    if blocked[which] and which == "target" then
+        local id = CachedTargetCreature()
+        if id then
+            -- The identity is secret but the plate isn't: draw what we recorded.
+            model:SetCreature(id)
+            ApplyCamera(model, cfg)
+            blocked[which] = false
+            SyncToAnchor(which)
+            UpdateVisibility()
+            return
+        end
+    end
+    if blocked[which] then
+        -- Empty beats WRONG. A stale model is indistinguishable from a correct one.
+        -- ⚠ ClearModel is NOT enough on 12.1 (owner-observed in a delve,
+        -- 2026-09-19): friendly target → clear → hostile target showed the
+        -- FRIENDLY model again. So the frame is hidden outright by
+        -- UpdateVisibility while `blocked` is set; the clear is belt-and-braces.
+        if model.ClearModel then model:ClearModel() end
+        UpdateVisibility()
+        return
+    end
+    model:SetUnit(unit)
+    ApplyCamera(model, cfg)
     SyncToAnchor(which)
 end
 
@@ -204,9 +337,10 @@ end
 local function ApplyStrata(which)
     local s = db[which].strata or "MEDIUM"
     models[which]:SetFrameStrata(s)
-    portraits[which]:SetFrameStrata(s)
     anchors[which]:SetFrameStrata(s)
     ghosts[which]:SetFrameStrata(s)
+    local sl = StandInLayout(which)
+    portraits[which]:SetFrameStrata(sl and sl.strata or s)
 end
 
 local function ApplySettings(which)
@@ -241,6 +375,7 @@ local function MoveModel(which, dx, dy)
     local cfg = db[which]
     cfg.x = cfg.x + dx
     cfg.y = cfg.y + dy
+    StashLayout(cfg, cfg.mode or "3d")
     ApplySettings(which)
 end
 
@@ -277,11 +412,13 @@ local function CreateUnitFrames(which)
         self:StopMovingOrSizing()
         self:SetUserPlaced(true)
         self._dragging = false
-        if not panels.unified or not panels.unified:IsShown() then
+        if editing ~= which then
             ghosts[which]:Hide()
         end
         SavePosition(which)
+        StashLayout(db[which], db[which].mode or "3d")
         SyncToAnchor(which)
+        GP:Notify("position", which)
     end)
     anchors[which] = anchor
 
@@ -303,410 +440,6 @@ local function CreateUnitFrames(which)
     tex:SetAllPoints(portFrame)
     portFrame.tex = tex
     portraits[which] = portFrame
-end
-
-------------------------------------------------------------------------
--- Slider helper
-------------------------------------------------------------------------
-local sliderCount = 0
-local function MakeSlider(parent, label, minVal, maxVal, step, getValue, setValue, yOffset)
-    sliderCount = sliderCount + 1
-
-    local lbl = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, yOffset)
-    lbl:SetText(label)
-
-    local sName  = "GloomsPortraitsSlider" .. sliderCount
-    local slider = CreateFrame("Slider", sName, parent, "OptionsSliderTemplate")
-    slider:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, yOffset - 17)
-    slider:SetWidth(200)
-    slider:SetMinMaxValues(minVal, maxVal)
-    slider:SetValueStep(step)
-    slider:SetObeyStepOnDrag(true)
-    slider:SetValue(getValue())
-
-    _G[sName .. "Low"]:SetText(tostring(minVal))
-    _G[sName .. "High"]:SetText(tostring(maxVal))
-    _G[sName .. "Text"]:SetText("")
-
-    local readout = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    readout:SetPoint("LEFT", slider, "RIGHT", 6, 0)
-
-    local function Refresh() readout:SetText(string.format("%.2f", slider:GetValue())) end
-    Refresh()
-
-    slider:SetScript("OnValueChanged", function(self, value)
-        setValue(value)
-        Refresh()
-    end)
-
-    return slider
-end
-
-------------------------------------------------------------------------
--- Nudge pad
-------------------------------------------------------------------------
-local nudgeStep = 5
-
-local function MakeNudgePad(parent, which, yOffset)
-    local lbl = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, yOffset)
-    lbl:SetText("Position")
-
-    local btnSize = 22
-    local padX    = 12
-    local padY    = yOffset - 16
-
-    local function MakeArrow(symbol, dx, dy, offX, offY)
-        local btn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-        btn:SetSize(btnSize, btnSize)
-        btn:SetText(symbol)
-        btn:SetPoint("TOPLEFT", parent, "TOPLEFT", padX + offX, padY + offY)
-        btn:SetScript("OnClick", function() MoveModel(which, dx * nudgeStep, dy * nudgeStep) end)
-        btn:SetScript("OnMouseDown", function(self) self._held = true; self._timer = 0 end)
-        btn:SetScript("OnMouseUp",   function(self) self._held = false end)
-        btn:SetScript("OnUpdate", function(self, elapsed)
-            if self._held then
-                self._timer = (self._timer or 0) + elapsed
-                if self._timer > 0.3 then
-                    self._timer = self._timer - 0.08
-                    MoveModel(which, dx * nudgeStep, dy * nudgeStep)
-                end
-            end
-        end)
-        return btn
-    end
-
-    MakeArrow("^",  0,  1, btnSize,      0)
-    MakeArrow("v",  0, -1, btnSize,     -btnSize * 2)
-    MakeArrow("<", -1,  0, 0,           -btnSize)
-    MakeArrow(">",  1,  0, btnSize * 2, -btnSize)
-
-    local stepLbl = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    stepLbl:SetPoint("TOPLEFT", parent, "TOPLEFT", padX + btnSize * 3 + 8, padY)
-    stepLbl:SetText("Step:")
-
-    local steps    = { 1, 5, 10, 25 }
-    local stepBtns = {}
-    for i, s in ipairs(steps) do
-        local sb = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-        sb:SetSize(26, 18)
-        sb:SetText(tostring(s))
-        sb:SetPoint("TOPLEFT", parent, "TOPLEFT",
-            padX + btnSize * 3 + 6, padY - 18 * (i - 1) - 16)
-        sb:SetScript("OnClick", function()
-            nudgeStep = s
-            for _, b in ipairs(stepBtns) do b:SetAlpha(0.5) end
-            sb:SetAlpha(1.0)
-        end)
-        sb:SetAlpha(s == nudgeStep and 1.0 or 0.5)
-        stepBtns[i] = sb
-    end
-end
-
-------------------------------------------------------------------------
--- Lock / Unlock
-------------------------------------------------------------------------
-SetLocked = function(locked)
-    isUnlocked = not locked
-    for _, which in ipairs({ "player", "target" }) do
-        local anchor = anchors[which]
-        if not anchor then return end
-        anchor:EnableMouse(not locked)
-    end
-    if locked and panels.unified then
-        panels.unified:Hide()
-    end
-end
-
-------------------------------------------------------------------------
--- BuildControls: populate one tab's content frame
---
--- Layout (y from tab content top):
---   -6    "Display Mode" label
---   -20   [3D Model] [2D Portrait] toggle buttons
---   -48   Size slider                          (always visible)
---   -106  Mode-specific block, fixed 232px:
---           3D: Facing / Zoom / Vert.Offset / Pitch  (4 x 58)
---           2D: note label (portrait is always circular)
---   -338  Position nudge pad
---   -438  Layer buttons
---   -478  Show When buttons
-------------------------------------------------------------------------
-local function BuildControls(f, which)
-    local y = -6
-
-    local modeLbl = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    modeLbl:SetPoint("TOPLEFT", f, "TOPLEFT", 12, y)
-    modeLbl:SetText("Display Mode")
-    y = y - 20
-
-    local btn3D = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    btn3D:SetSize(110, 22)
-    btn3D:SetText("3D Model")
-    btn3D:SetPoint("TOPLEFT", f, "TOPLEFT", 12, y)
-
-    local btn2D = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    btn2D:SetSize(110, 22)
-    btn2D:SetText("2D Portrait")
-    btn2D:SetPoint("TOPLEFT", f, "TOPLEFT", 130, y)
-    y = y - 28
-
-    MakeSlider(f, "Size (px)", 50, 700, 5,
-        function() return db[which].size end,
-        function(v)
-            db[which].size = v
-            anchors[which]:SetSize(v, v)
-            SyncToAnchor(which)
-        end, y)
-    y = y - 58
-
-    local modeBlockTop = y
-    local modeBlockH   = 58 * 4  -- 232px, same for both sub-frames
-
-    -- 3D sub-frame
-    local c3 = CreateFrame("Frame", nil, f)
-    c3:SetPoint("TOPLEFT", f, "TOPLEFT", 0, modeBlockTop)
-    c3:SetSize(270, modeBlockH)
-    do
-        local ly = -6
-        MakeSlider(c3, "Facing (0 - 6.28)", 0, 6.28, 0.05,
-            function() return db[which].facing end,
-            function(v) db[which].facing = v; if models[which] then models[which]:SetFacing(v) end end,
-            ly)
-        ly = ly - 58
-        MakeSlider(c3, "Zoom (1=close, 5=far)", 0.5, 5.0, 0.05,
-            function() return db[which].zoom end,
-            function(v)
-                db[which].zoom = v
-                if models[which] then
-                    models[which]:SetPortraitZoom(0)
-                    models[which]:SetCamDistanceScale(v)
-                end
-            end, ly)
-        ly = ly - 58
-        MakeSlider(c3, "Vertical Offset (-400 to +400)", -400, 400, 1,
-            function() return db[which].modelYOffset or 0 end,
-            function(v) db[which].modelYOffset = v; if models[which] then models[which]:SetViewTranslation(0, v) end end,
-            ly)
-        ly = ly - 58
-        MakeSlider(c3, "Pitch (-1.5 to 1.5)", -1.5, 1.5, 0.02,
-            function() return db[which].pitch or 0 end,
-            function(v) db[which].pitch = v; if models[which] then models[which]:SetPitch(v) end end,
-            ly)
-    end
-
-    -- 2D sub-frame (portrait has no extra configurable settings)
-    local c2 = CreateFrame("Frame", nil, f)
-    c2:SetPoint("TOPLEFT", f, "TOPLEFT", 0, modeBlockTop)
-    c2:SetSize(270, modeBlockH)
-    do
-        local note = c2:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        note:SetPoint("TOPLEFT", c2, "TOPLEFT", 12, -14)
-        note:SetTextColor(0.6, 0.6, 0.6, 1)
-        note:SetText("Portrait renders as a circle.\n(WoW engine limitation)")
-    end
-
-    y = modeBlockTop - modeBlockH - 10
-
-    MakeNudgePad(f, which, y)
-    y = y - 100
-
-    -- Layer
-    local strataLbl = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    strataLbl:SetPoint("TOPLEFT", f, "TOPLEFT", 12, y)
-    strataLbl:SetText("Layer")
-
-    local strataList = { "BACKGROUND", "LOW", "MEDIUM", "HIGH", "DIALOG" }
-    local strataDesc = { "Below everything", "Below UI frames", "Default", "Above most UI", "Above almost all" }
-    local strataBtns = {}
-    for i, s in ipairs(strataList) do
-        local sb = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        sb:SetSize(46, 18)
-        sb:SetText(s == "BACKGROUND" and "BG" or s == "MEDIUM" and "MED" or s == "DIALOG" and "DLG" or s)
-        sb:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + (i - 1) * 50, y - 18)
-        sb:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_TOP")
-            GameTooltip:ClearLines()
-            GameTooltip:AddLine(s, 1, 1, 1)
-            GameTooltip:AddLine(strataDesc[i], 0.8, 0.8, 0.8)
-            GameTooltip:Show()
-        end)
-        sb:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        sb:SetScript("OnClick", function()
-            db[which].strata = s
-            ApplyStrata(which)
-            for _, b in ipairs(strataBtns) do b:SetAlpha(0.5) end
-            sb:SetAlpha(1.0)
-        end)
-        sb:SetAlpha((db[which].strata or "MEDIUM") == s and 1.0 or 0.5)
-        strataBtns[i] = sb
-    end
-    y = y - 40
-
-    -- Show When
-    local condLbl = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    condLbl:SetPoint("TOPLEFT", f, "TOPLEFT", 12, y)
-    condLbl:SetText("Show When")
-
-    local condList  = { "always", "combat", "target", "combat_or_target" }
-    local condNames = { "Always", "Combat", "Target", "Either" }
-    local condBtns  = {}
-    for i, c in ipairs(condList) do
-        local cb = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        cb:SetSize(56, 18)
-        cb:SetText(condNames[i])
-        cb:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + (i - 1) * 60, y - 18)
-        cb:SetScript("OnEnter", function(self)
-            local tips = {
-                "Always visible", "Only while in combat",
-                "Only while you have a target", "While in combat OR have a target",
-            }
-            GameTooltip:SetOwner(self, "ANCHOR_TOP")
-            GameTooltip:ClearLines()
-            GameTooltip:AddLine(tips[i], 0.9, 0.9, 0.9)
-            GameTooltip:Show()
-        end)
-        cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        cb:SetScript("OnClick", function()
-            db[which].showCondition = c
-            for _, b in ipairs(condBtns) do b:SetAlpha(0.5) end
-            cb:SetAlpha(1.0)
-            UpdateVisibility()
-        end)
-        cb:SetAlpha((db[which].showCondition or "always") == c and 1.0 or 0.5)
-        condBtns[i] = cb
-    end
-
-    -- Mode toggle
-    local function RefreshModeUI()
-        local mode = db[which].mode or "3d"
-        if mode == "3d" then
-            c3:Show(); c2:Hide()
-            btn3D:SetAlpha(1.0); btn2D:SetAlpha(0.5)
-        else
-            c3:Hide(); c2:Show()
-            btn3D:SetAlpha(0.5); btn2D:SetAlpha(1.0)
-        end
-    end
-
-    btn3D:SetScript("OnClick", function()
-        db[which].mode = "3d"
-        ApplyMode(which)
-        UpdateVisibility()
-        RefreshModeUI()
-    end)
-
-    btn2D:SetScript("OnClick", function()
-        db[which].mode = "2d"
-        ApplyMode(which)
-        UpdateVisibility()
-        RefreshModeUI()
-    end)
-
-    RefreshModeUI()
-    refreshUI[which] = RefreshModeUI
-end
-
-------------------------------------------------------------------------
--- Control panel
-------------------------------------------------------------------------
-local function CreateControlPanel()
-    local panelW = 290
-    local panelH = 30 + 30 + 48 + 58 + 232 + 100 + 40 + 58 + 40
-
-    local panel = CreateFrame("Frame", "GloomsPortraits_Panel", UIParent, "BackdropTemplate")
-    panel:SetSize(panelW, panelH)
-    panel:SetFrameStrata("HIGH")
-    panel:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    panel:SetBackdrop({
-        bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
-        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-        tile = true, tileSize = 32, edgeSize = 16,
-        insets = { left = 4, right = 4, top = 4, bottom = 4 },
-    })
-    panel:SetMovable(true)
-    panel:EnableMouse(true)
-    panel:RegisterForDrag("LeftButton")
-    panel:SetScript("OnDragStart", panel.StartMoving)
-    panel:SetScript("OnDragStop",  panel.StopMovingOrSizing)
-
-    local titleBar = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    titleBar:SetPoint("TOP", panel, "TOP", 0, -8)
-    titleBar:SetText("Gloom's Portraits")
-
-    local tabPlayer = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    tabPlayer:SetSize(110, 22)
-    tabPlayer:SetText("Player")
-    tabPlayer:SetPoint("TOPLEFT", panel, "TOPLEFT", 14, -28)
-
-    local tabTarget = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    tabTarget:SetSize(110, 22)
-    tabTarget:SetText("Target")
-    tabTarget:SetPoint("TOPLEFT", panel, "TOPLEFT", 140, -28)
-
-    local function MakeTabContent()
-        local f = CreateFrame("Frame", nil, panel)
-        f:SetPoint("TOPLEFT",     panel, "TOPLEFT",     8,  -56)
-        f:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -8,   8)
-        f:Hide()
-        return f
-    end
-
-    local playerContent = MakeTabContent()
-    local targetContent = MakeTabContent()
-    local activeTab = "player"
-
-    local function ShowGhostForTab(which)
-        for _, w in ipairs({ "player", "target" }) do
-            local g   = ghosts[w]
-            local cfg = db[w]
-            if w == which then
-                g:SetSize(cfg.size, cfg.size)
-                g:ClearAllPoints()
-                g:SetPoint("CENTER", UIParent, "CENTER", cfg.x, cfg.y)
-                g:Show()
-            else
-                g:Hide()
-            end
-        end
-    end
-
-    local function ShowTab(which)
-        activeTab = which
-        if which == "player" then
-            playerContent:Show(); targetContent:Hide()
-            tabPlayer:SetAlpha(1.0); tabTarget:SetAlpha(0.6)
-        else
-            playerContent:Hide(); targetContent:Show()
-            tabPlayer:SetAlpha(0.6); tabTarget:SetAlpha(1.0)
-        end
-        if refreshUI[which] then refreshUI[which]() end
-        if panel:IsShown() then ShowGhostForTab(which) end
-    end
-
-    tabPlayer:SetScript("OnClick", function() ShowTab("player") end)
-    tabTarget:SetScript("OnClick", function() ShowTab("target") end)
-
-    BuildControls(playerContent, "player")
-    BuildControls(targetContent, "target")
-
-    ShowTab("player")
-
-    panel:SetScript("OnShow", function()
-        SetLocked(false)
-        ShowGhostForTab(activeTab)
-    end)
-    panel:SetScript("OnHide", function()
-        SetLocked(true)
-        for _, which in ipairs({ "player", "target" }) do
-            if not anchors[which]._dragging then ghosts[which]:Hide() end
-        end
-    end)
-
-    panel:Hide()
-    panels.unified = panel
-    tinsert(UISpecialFrames, "GloomsPortraits_Panel")
 end
 
 ------------------------------------------------------------------------
@@ -738,8 +471,14 @@ UpdateVisibility = function()
         local mode    = (db[which] and db[which].mode) or "3d"
 
         anchor:SetShown(visible)
-        model:SetShown(visible and mode == "3d")
-        portF:SetShown(visible and mode == "2d")
+        -- A blocked 3D model is never shown, whatever ClearModel did or didn't do.
+        -- ★ FALLBACK (owner-QA'd in a delve, 2026-09-19): SetPortraitTexture is
+        -- NOT on the guarded list — it renders engine-side and hands Lua nothing —
+        -- so a hostile that the game refuses to identify for a 3D model still
+        -- gets its correct 2D portrait, in the same frame, at the same size.
+        -- The right face beats an empty frame.
+        model:SetShown(visible and mode == "3d" and not blocked[which])
+        portF:SetShown(visible and (mode == "2d" or blocked[which] == true))
     end
 end
 
@@ -753,40 +492,128 @@ local function OnTargetChanged()
 end
 
 ------------------------------------------------------------------------
--- Minimap button
--- ⚠ STAGE 1 ONLY. The suite has ONE launcher — the Hub's GS button — and
--- every other tool dropped its own. This one survives until the Portraits
--- tab exists (stage 2), because until then the panel has nothing else to
--- open it. LibDBIcon comes from GloomsHub (a hard dependency), so nothing
--- is embedded here.
+-- The API the Portraits tab drives (GloomsPortraits_Tab.lua). Everything
+-- applies LIVE: there is no save step, the frames ARE the preview.
 ------------------------------------------------------------------------
-local function CreateMinimapButton()
-    local LibStub = _G.LibStub
-    if not LibStub then
-        print("|cff936bffGloom's Portraits:|r LibStub not found — minimap button unavailable.")
-        return
+GP.UNITS = { "player", "target" }
+
+-- The unit's saved settings, or nil before PLAYER_LOGIN.
+function GP:Config(which)
+    return db and db[which] or nil
+end
+
+function GP:Defaults(which)
+    return DEFAULTS[which]
+end
+
+function GP:IsReady()
+    return initialised
+end
+
+-- Size / position changed: cheap re-anchor, no model reload.
+function GP:ApplyLayout(which)
+    if not initialised then return end
+    local cfg, anchor = db[which], anchors[which]
+    StashLayout(cfg, cfg.mode or "3d")   -- keep the stash current for the active mode
+    anchor:SetSize(cfg.size, cfg.size)
+    anchor:ClearAllPoints()
+    anchor:SetPoint("CENTER", UIParent, "CENTER", cfg.x, cfg.y)
+    SyncToAnchor(which)
+end
+
+function GP:Nudge(which, dx, dy)
+    if not initialised then return end
+    MoveModel(which, dx, dy)
+end
+
+function GP:SetMode(which, mode)
+    if not initialised then return end
+    local cfg = db[which]
+    local old = cfg.mode or "3d"
+    if mode ~= old then
+        StashLayout(cfg, old)
+        cfg.mode = mode
+        RestoreLayout(cfg, mode)
+        ApplySettings(which)   -- re-anchors to the restored layout
+    else
+        ApplyMode(which)
     end
-    local LDB     = LibStub:GetLibrary("LibDataBroker-1.1", true)
-    local LDBIcon = LibStub:GetLibrary("LibDBIcon-1.0", true)
-    if not LDB or not LDBIcon then
-        print("|cff936bffGloom's Portraits:|r LibDBIcon not found — minimap button unavailable.")
-        return
+    UpdateVisibility()
+end
+
+function GP:SetStrata(which, strata)
+    if not initialised then return end
+    db[which].strata = strata
+    StashLayout(db[which], db[which].mode or "3d")
+    ApplyStrata(which)
+end
+
+function GP:SetCondition(which, cond)
+    if not initialised then return end
+    db[which].showCondition = cond
+    UpdateVisibility()
+end
+
+-- The 3D camera: facing (radians), zoom, modelYOffset, pitch. Each pokes
+-- the live model directly, exactly as the old panel's sliders did.
+function GP:SetCamera(which, key, v)
+    if not initialised then return end
+    db[which][key] = v
+    local m = models[which]
+    if not m then return end
+    if     key == "facing"       then m:SetFacing(v)
+    elseif key == "zoom"         then m:SetPortraitZoom(0); m:SetCamDistanceScale(v)
+    elseif key == "modelYOffset" then m:SetViewTranslation(0, v)
+    elseif key == "pitch"        then m:SetPitch(v)
     end
-    local broker = LDB:NewDataObject("GloomsPortraits", {
-        type  = "launcher",
-        label = "Gloom's Portraits",
-        icon  = "Interface\\Icons\\inv_12_nonmasculinecharacter_bloodelf",
-        OnClick = function()
-            local p = panels.unified
-            if p:IsShown() then p:Hide() else p:Show() end
-        end,
-        OnTooltipShow = function(tooltip)
-            tooltip:AddLine("Gloom's Portraits", 1, 1, 1)
-            tooltip:AddLine("Click: toggle controls", 0.8, 0.8, 0.8)
-        end,
-    })
-    if type(db.minimap) ~= "table" then db.minimap = { hide = false } end
-    LDBIcon:Register("GloomsPortraits", broker, db.minimap)
+end
+
+-- Back to the factory settings for ONE unit. The tab confirms first.
+function GP:Reset(which)
+    if not initialised then return end
+    db[which] = {}
+    ApplyDefaults(db[which], DEFAULTS[which])
+    ApplySettings(which)
+    if which == "player" or UnitExists("target") then
+        SetupModel(which)
+        SetupPortrait(which)
+    end
+    UpdateVisibility()
+    if editing == which then GP:SetEditing(which) end
+    GP:Notify("reset", which)
+end
+
+-- Which unit the tab is editing. Unlocks dragging and shows the green
+-- outline for that unit; nil locks everything and hides the outlines —
+-- the tab calls this from its OnShow/OnHide, so closing the Suite window
+-- always locks.
+function GP:SetEditing(which)
+    editing = which
+    isUnlocked = which ~= nil
+    for _, w in ipairs(GP.UNITS) do
+        local anchor, g = anchors[w], ghosts[w]
+        if anchor then anchor:EnableMouse(isUnlocked) end
+        if g then
+            if w == which and db then
+                local cfg = db[w]
+                g:SetSize(cfg.size, cfg.size)
+                g:ClearAllPoints()
+                g:SetPoint("CENTER", UIParent, "CENTER", cfg.x, cfg.y)
+                g:Show()
+            elseif not (anchor and anchor._dragging) then
+                g:Hide()
+            end
+        end
+    end
+end
+
+-- The tab listens so a drag on screen updates its X/Y rows.
+function GP:OnChange(fn)
+    listeners[#listeners + 1] = fn
+end
+
+function GP:Notify(what, which)
+    for _, fn in ipairs(listeners) do fn(what, which) end
 end
 
 ------------------------------------------------------------------------
@@ -826,13 +653,11 @@ local function Initialise()
     CreateUnitFrames("target")
     CreateGhostFrame("player")
     CreateGhostFrame("target")
-    CreateControlPanel()
-    CreateMinimapButton()
 
     ApplySettings("player")
     ApplySettings("target")
 
-    SetLocked(true)
+    GP:SetEditing(nil)
     initialised = true
 
     models.player:Hide()   anchors.player:Hide()   portraits.player:Hide()
@@ -850,6 +675,8 @@ eventFrame:RegisterEvent("UNIT_MODEL_CHANGED")
 eventFrame:RegisterEvent("UNIT_PORTRAIT_UPDATE")
 eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+eventFrame:RegisterEvent("NAME_PLATE_UNIT_ADDED")
+eventFrame:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 
 eventFrame:SetScript("OnEvent", function(self, event, arg1)
     if event == "PLAYER_LOGIN" then
@@ -858,15 +685,36 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         if initialised then
+            RecordTarget()
             SetupModel("player")
             SetupPortrait("player")
             OnTargetChanged()
         end
 
+    elseif event == "NAME_PLATE_UNIT_ADDED" then
+        -- The target's own plate may appear after the target did.
+        if UnitExists("target") then RecordTarget() end
+
+    elseif event == "NAME_PLATE_UNIT_REMOVED" then
+        plateCache[arg1] = nil
+
     elseif event == "PLAYER_TARGET_CHANGED" then
+        RecordTarget()
         OnTargetChanged()
 
-    elseif event == "PLAYER_REGEN_DISABLED" or event == "PLAYER_REGEN_ENABLED" then
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        UpdateVisibility()
+
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        -- ★ MEASURED IN A DELVE, 2026-09-19: a hostile's identity is secret ONLY
+        -- IN COMBAT (issecretvalue(UnitGUID("target")) → false before the pull,
+        -- true during it). So a model the game refused mid-fight can be asked
+        -- for again the moment combat drops — and the 2D stand-in gives way to
+        -- the real 3D model without the owner re-targeting.
+        RecordTarget()       -- the target is identifiable again
+        if initialised and blocked.target and UnitExists("target") then
+            SetupModel("target")
+        end
         UpdateVisibility()
 
     elseif event == "UNIT_MODEL_CHANGED" then
@@ -877,16 +725,19 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         end
 
     elseif event == "UNIT_PORTRAIT_UPDATE" then
-        if arg1 == "player" and initialised and db.player.mode == "2d" then
+        -- Also while a 3D model is blocked: the portrait is standing in for it.
+        if arg1 == "player" and initialised and (db.player.mode == "2d" or blocked.player) then
             SetupPortrait("player")
-        elseif arg1 == "target" and initialised and db.target.mode == "2d" and UnitExists("target") then
+        elseif arg1 == "target" and initialised and (db.target.mode == "2d" or blocked.target) and UnitExists("target") then
             SetupPortrait("target")
         end
     end
 end)
 
 ------------------------------------------------------------------------
--- Slash commands
+-- Slash commands — /gp opens the Portraits tab. The old lock/unlock/panel
+-- subcommands are gone with the panel: the tab unlocks dragging while it is
+-- open and locks it again when it closes. Reset lives in the tab's rail.
 ------------------------------------------------------------------------
 SLASH_GLOOMSPORTRAITS1 = "/gp"
 SLASH_GLOOMSPORTRAITS2 = "/portraits"
@@ -897,34 +748,23 @@ SlashCmdList["GLOOMSPORTRAITS"] = function(msg)
         print("|cff936bffGloom's Portraits:|r Still loading, please wait.")
         return
     end
-    msg = msg:lower():gsub("^%s+", ""):gsub("%s+$", "")
-
-    if msg == "lock" then
-        SetLocked(true)
-        print("|cff936bffGloom's Portraits:|r Locked.")
-    elseif msg == "unlock" then
-        SetLocked(false)
-        print("|cff936bffGloom's Portraits:|r Unlocked.")
-    elseif msg == "panel" then
-        local p = panels.unified
-        if p:IsShown() then p:Hide() else p:Show() end
-    elseif msg == "reset" then
-        GloomsPortraitsDB.player = {}
-        GloomsPortraitsDB.target = {}
-        ApplyDefaults(GloomsPortraitsDB.player, DEFAULTS.player)
-        ApplyDefaults(GloomsPortraitsDB.target, DEFAULTS.target)
-        db = GloomsPortraitsDB
-        ApplySettings("player")
-        ApplySettings("target")
-        SetupModel("player")
-        SetupPortrait("player")
-        if UnitExists("target") then
-            SetupModel("target")
-            SetupPortrait("target")
+    msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+    if msg == "plates" then
+        -- QA probe: what the nameplate cache knows right now.
+        local n = 0
+        for i = 1, 40 do
+            local token = "nameplate" .. i
+            local id = plateCache[token]
+            if id then
+                n = n + 1
+                local same = UnitIsUnit("target", token)
+                same = not (issecretvalue and issecretvalue(same)) and same
+                print(("  %s → creature %d%s"):format(token, id, same and "  ← TARGET" or ""))
+            end
         end
-        print("|cff936bffGloom's Portraits:|r Reset to defaults.")
-    else
-        local p = panels.unified
-        if p:IsShown() then p:Hide() else p:Show() end
+        print(("|cff936bffGloom's Portraits:|r %d plate%s cached, target %s."):format(
+            n, n == 1 and "" or "s", blocked.target and "BLOCKED (2D stand-in)" or "3D"))
+        return
     end
+    GloomsHub:ToggleWindow("portraits")
 end
