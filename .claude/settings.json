@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "~/GloomsHub",
+      "~/GloomsBars",
+      "~/GloomsAuras",
+      "~/GloomsOverlays",
+      "/Applications/World of Warcraft/_retail_/Interface/AddOns",
+      "/Applications/World of Warcraft/_retail_/WTF"
+    ]
+  }
+}
