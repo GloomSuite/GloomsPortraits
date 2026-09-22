@@ -85,6 +85,7 @@ local COND_LABEL = {
   combat           = "In combat",
   target           = "Target selected",
   combat_or_target = "Combat or target",
+  never            = "Off",
 }
 
 local function Cfg()
@@ -402,7 +403,8 @@ local function BuildEditor(p)
     { "combat",           "In combat",        "Only while you are in combat." },
     { "target",           "Target selected",  "Only while you have a target." },
     { "combat_or_target", "Combat or target", "While in combat OR while you have a target." },
-  }, 120, 20, PAD, -112, 6, function(v)
+    { "never",            "Off",              "Never shown. The settings are kept." },
+  }, 100, 20, PAD, -112, 6, function(v)
     if selected then GP:SetCondition(selected, v) end
     RefreshList()
   end)

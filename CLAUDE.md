@@ -64,6 +64,8 @@ GLOBAL, referenced exactly once, in `MigrateFromPredecessor` — the same preced
   wears the 2D set (the owner, 2026-09-19: a stand-in at the model's size and place is wrong).
 - **`/gp plates`** is a QA probe (what the nameplate cache holds, which plate is the target). Keep
   probes in the addon — a `/run` over 255 characters silently does nothing (Hub LESSONS).
+- **Visibility has an Off choice** (`showCondition = "never"`, 2026-09-21 — the owner: *"no way to
+  turn OFF a portrait. Can't believe we missed that."*). The settings are kept; nothing else changes.
 - **The tab is the lock.** `SetEditing(which)` on the container's OnShow unlocks dragging and
   shows the green outline for the selected unit; OnHide locks everything. There is no other
   lock/unlock control, on purpose.

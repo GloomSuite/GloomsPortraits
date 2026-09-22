@@ -29,7 +29,7 @@ local DEFAULTS = {
         strata        = "MEDIUM",
         modelYOffset  = 0,
         pitch         = 0,
-        showCondition = "always",  -- "always"|"combat"|"target"|"combat_or_target"
+        showCondition = "always",  -- "always"|"combat"|"target"|"combat_or_target"|"never" (off)
         mode          = "3d",      -- "3d"|"2d"
     },
     target = {
@@ -461,6 +461,7 @@ UpdateVisibility = function()
         local cond = (db[which] and db[which].showCondition) or "always"
         local condMet
         if     cond == "always"           then condMet = true
+        elseif cond == "never"            then condMet = false   -- "Off" (the owner, 2026-09-21: there was no way to turn one off)
         elseif cond == "combat"           then condMet = inCombat
         elseif cond == "target"           then condMet = hasTarget
         elseif cond == "combat_or_target" then condMet = inCombat or hasTarget
