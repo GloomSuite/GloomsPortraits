@@ -54,20 +54,21 @@ GLOBAL, referenced exactly once, in `MigrateFromPredecessor` — the same preced
   `GloomsPortraits` namespace that the tab drives:
   `Config · ApplyLayout · Nudge · SetMode · SetStrata · SetCondition · SetCamera · Reset ·
   SetEditing · OnChange`. It draws no UI.
-- **`GloomsPortraits_Tab.lua` — the PORTRAITS tab** (`GloomsHub:RegisterTab`, id `portraits`,
-  order 40), built entirely on `LibGloomSkin` and laid out like GB/Overlays: rail (the Gp mark,
-  a Player/Target list, Reset) + a scrolling editor (mode, size + position with nudge, the 3D
-  camera section that hides in 2D, layer, visibility). **Everything applies live; there is no
-  Save.** Gate `SKIN_NEEDS = 4` (tabHeader); bump it in the same commit as any newer call.
-- **Each mode keeps its own layout.** `x y size strata` at the top level are the ACTIVE mode's;
+- **`GloomsPortraits_Pages.lua` — the PORTRAITS windows** (2026-09-27, the Hub's two-window design,
+  `windows = true`, id `portraits`, order 40, `SKIN_NEEDS = 17`), built without a mock from Unit
+  Frames' pages: the selector is Player | Target; two sections — Global <Unit> Settings (Display
+  Type, Visibility, positions, Strata | **Level** (2026-09-29, per mode, 0 = Auto), Size, Reset) and
+  3D Camera (dims in 2D or Never). No nudge arrows — the dials' ↑/↓ keys. **Everything applies live.**
+  The old `GloomsPortraits_Tab.lua` is out of the TOC — delete it once the owner approves.
+- **Each mode keeps its own layout.** `x y size strata level` at the top level are the ACTIVE mode's;
   `cfg.layouts[mode]` holds the other's; switching stashes and restores. The in-combat 2D stand-in
   wears the 2D set (the owner, 2026-09-19: a stand-in at the model's size and place is wrong).
 - **`/gp plates`** is a QA probe (what the nameplate cache holds, which plate is the target). Keep
   probes in the addon — a `/run` over 255 characters silently does nothing (Hub LESSONS).
 - **Visibility has an Off choice** (`showCondition = "never"`, 2026-09-21 — the owner: *"no way to
   turn OFF a portrait. Can't believe we missed that."*). The settings are kept; nothing else changes.
-- **The tab is the lock.** `SetEditing(which)` on the container's OnShow unlocks dragging and
-  shows the green outline for the selected unit; OnHide locks everything. There is no other
+- **The windows are the lock.** `SetEditing(which)` on the windows' open (and on a unit switch)
+  unlocks dragging and shows the green outline for the selected unit; closing locks everything. There is no other
   lock/unlock control, on purpose.
 - **No profile block, no minimap button, no floating panel.** Portraits has two fixed units
   and one account-wide config, so there is nothing to switch between; the suite has ONE

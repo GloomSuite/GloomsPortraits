@@ -9,4 +9,4 @@
 ## SavedVariables: GloomsPortraitsDB
 
 GloomsPortraits.lua
-GloomsPortraits_Tab.lua
+GloomsPortraits_Pages.lua

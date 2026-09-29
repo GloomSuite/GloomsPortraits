@@ -94,7 +94,7 @@ end
 -- one and restores the other, so 3D and 2D each keep their own size, place
 -- and layer — and the 2D set is what the in-combat stand-in wears.
 ------------------------------------------------------------------------
-local LAYOUT_KEYS = { "x", "y", "size", "strata" }
+local LAYOUT_KEYS = { "x", "y", "size", "strata", "level" }   -- level: 2026-09-29
 
 local function StashLayout(cfg, mode)
     cfg.layouts = cfg.layouts or {}
@@ -334,13 +334,26 @@ local function ApplyMode(which)
 end
 
 ------------------------------------------------------------------------
+-- The LEVEL within the strata (2026-09-29, the owner: the fine control Overlays
+-- and Unit Frames have). nil / 0 = Auto: the level WoW gave the frame when it
+-- was made (kept in `naturalLevel`). The drag anchor and the green outline sit
+-- just above the portrait so they still catch the mouse and show over it.
+local naturalLevel = {}
 local function ApplyStrata(which)
-    local s = db[which].strata or "MEDIUM"
+    local cfg = db[which]
+    local s = cfg.strata or "MEDIUM"
     models[which]:SetFrameStrata(s)
     anchors[which]:SetFrameStrata(s)
     ghosts[which]:SetFrameStrata(s)
     local sl = StandInLayout(which)
     portraits[which]:SetFrameStrata(sl and sl.strata or s)
+    local nat = naturalLevel[which] or models[which]:GetFrameLevel()
+    naturalLevel[which] = nat
+    local lv = (cfg.level and cfg.level > 0) and cfg.level or nat
+    models[which]:SetFrameLevel(lv)
+    local plv = sl and sl.level
+    portraits[which]:SetFrameLevel((plv and plv > 0) and plv or lv)
+    anchors[which]:SetFrameLevel(lv + 2)
 end
 
 local function ApplySettings(which)
@@ -545,6 +558,13 @@ end
 function GP:SetStrata(which, strata)
     if not initialised then return end
     db[which].strata = strata
+    StashLayout(db[which], db[which].mode or "3d")
+    ApplyStrata(which)
+end
+
+function GP:SetLevel(which, level)
+    if not initialised then return end
+    db[which].level = (level and level > 0) and level or nil
     StashLayout(db[which], db[which].mode or "3d")
     ApplyStrata(which)
 end
