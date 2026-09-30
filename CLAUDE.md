@@ -1,5 +1,11 @@
 # Gloom's Portraits — project guide
 
+> ## ⚠ RETIRED 2026-09-29 — folded into Gloom's UI (`~/GloomsOverlays`)
+> A portrait is now an overlay TYPE in Gloom's UI (`GloomsOverlays_Portraits.lua` there carries this
+> addon's instance handling unchanged). This addon's AddOns symlink was removed; nothing here is
+> loaded. The repo and its public GitHub copy are untouched — what happens to them is the owner's
+> call. Do not build here.
+
 > **▶ PART OF THE GLOOM SUITE.** Gloom's Portraits is the suite's fifth tool, alongside Gloom's
 > Bars, Auras and Overlays, under the shared base addon **GloomsHub** (`~/GloomsHub`). All
 > cross-cutting suite facts — the plan, current state, and shared runtime contracts (design
